@@ -91,25 +91,42 @@ def strip_localhost_manifest_entries(manifest):
             pattern for pattern in sanitized['host_permissions']
             if not is_localhost_match(pattern)
         ]
+        if not sanitized['host_permissions']:
+            sanitized.pop('host_permissions')
 
     if 'externally_connectable' in sanitized and isinstance(sanitized['externally_connectable'].get('matches'), list):
         sanitized['externally_connectable']['matches'] = [
             pattern for pattern in sanitized['externally_connectable']['matches']
             if not is_localhost_match(pattern)
         ]
+        if not sanitized['externally_connectable']['matches']:
+            sanitized.pop('externally_connectable')
 
-    for script in sanitized.get('content_scripts', []):
-        if isinstance(script.get('matches'), list):
-            script['matches'] = [
-                pattern for pattern in script['matches']
-                if not is_localhost_match(pattern)
-            ]
+    if 'content_scripts' in sanitized:
+        scripts = []
+        for script in sanitized['content_scripts']:
+            if isinstance(script.get('matches'), list):
+                script['matches'] = [
+                    pattern for pattern in script['matches']
+                    if not is_localhost_match(pattern)
+                ]
+                if script['matches']:
+                    scripts.append(script)
+            else:
+                scripts.append(script)
+        sanitized['content_scripts'] = scripts
+        if not sanitized['content_scripts']:
+            sanitized.pop('content_scripts')
 
     return sanitized
 
 def pack_extension(target_dir, out_dir=None, ignore_dirs=None):
     if ignore_dirs is None:
         ignore_dirs = set()
+        
+    # Default security exclusions to prevent leaking source/secrets
+    default_ignores = {'.git', '.svn', '.vscode', '.idea', '__MACOSX', 'node_modules', '.DS_Store'}
+    ignore_dirs.update(default_ignores)
 
     project_dir = os.path.abspath(target_dir)
     
@@ -156,15 +173,25 @@ def pack_extension(target_dir, out_dir=None, ignore_dirs=None):
     try:
         with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
             for root, dirs, files in os.walk(project_dir):
+                # Prevent packaging the dist directory itself if it's inside the target_dir
+                if os.path.abspath(root) == dist_dir:
+                    dirs[:] = []
+                    continue
+                    
                 dirs[:] = [d for d in dirs if d not in ignore_dirs]
                 for file in files:
-                    # 忽略 macOS 的系统文件
-                    if file == '.DS_Store':
+                    if file in ignore_dirs:
                         continue
                         
                     file_path = os.path.join(root, file)
-                    # 计算在压缩包中的相对路径 (相对于打包目录)
+                    
+                    # Prevent packaging the target zip file if it's somehow inside the walk tree
+                    if os.path.abspath(file_path) == zip_path:
+                        continue
+                        
+                    # Calculate relative path and ensure forward slashes for ZIP spec (Windows fix)
                     arcname = os.path.relpath(file_path, project_dir)
+                    arcname = arcname.replace(os.sep, '/')
                     if arcname == 'manifest.json':
                         release_manifest = strip_localhost_manifest_entries(manifest)
                         zipf.writestr(
